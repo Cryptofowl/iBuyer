@@ -1,0 +1,6 @@
+[package]
+name = "decoder"
+type = "bin"
+authors = [""]
+
+[dependencies]
