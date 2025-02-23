@@ -2,11 +2,6 @@ fn main(CID: pub str<59>, hash: pub str<64>) {
     let mut (multibase, CIDbytes) = CID.as_bytes().as_slice().pop_front();
     assert(multibase == 66); // Assert that the base is base32
 
-    println(CID);
-    println(hash);
-    println(CID.as_bytes());
-    println(hash.as_bytes());
-
     // Map ASCII symbols to base32 encodings
     let mut base32: [[u1;5];96] = [[0,0,0,0,0];96];
 

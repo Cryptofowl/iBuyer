@@ -18,5 +18,3 @@ contract splitter {
             return output;
         }
 }
-
-    
