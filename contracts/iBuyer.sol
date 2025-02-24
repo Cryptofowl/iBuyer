@@ -28,7 +28,8 @@ interface IiBuyer {
     struct PacketInputs {
         bytes32 packetCID;
         bytes32 escrowDetails;
-        bytes32[] supportingDocuments;
+        bytes32[] openingDocuments;
+        bytes32[] closingDocuments;
         address escrowAddress;
         uint16  agentId;
         uint256 authorizedFunding;
@@ -124,7 +125,7 @@ contract iBuyer is IiBuyer, splitter {
             openingCID          : _packetCID,
             closingCID          : new bytes(36),
             escrowDetails       : inputs.escrowDetails,
-            openingDocuments    : inputs.supportingDocuments,
+            openingDocuments    : inputs.openingDocuments,
             closingDocuments    : new bytes32[](0),
             escrowAddress       : inputs.escrowAddress,
             agentId             : inputs.agentId,
@@ -152,7 +153,7 @@ contract iBuyer is IiBuyer, splitter {
 
         deal.closingId = oov3.assertTruthWithDefaults(assertion, address(this));
         deal.closingCID = _packetCID;
-
+        deal.closingDocuments = inputs.closingDocuments;
 
         return deal;
     }
