@@ -14,7 +14,8 @@ interface IiBuyer {
         bytes openingCID;
         bytes closingCID;
         bytes32 escrowDetails;
-        bytes32[] supportingDocuments;
+        bytes32[] openingDocuments;
+        bytes32[] closingDocuments;
         address escrowAddress;
         uint16  agentId;
         uint256 expiration;
@@ -47,13 +48,7 @@ contract iBuyer is IiBuyer, splitter {
     uint256 public immutable maxExpiration; // Maximum duration before a deal expires
     UltraVerifier public immutable verifier; 
 
-    mapping (bytes32 => Deal) public adeals;
-    mapping (address => Deal[]) public deals; // Why not map by assertion id? 
-    // Main issue would be asserters other than the agent creating the closing deal parameters
-    // i.e settle and release funding for opening after the challenge period, then immediately close with invalid parameters
-    // Can the closing parameters be overwritten as necessary? 
-    // Can the closing terms change before the challenge period ends? No, docs are signed
-    // Can add the originator as the authorized address in the deal struct
+    mapping (bytes32 => Deal) public deals;
 
     OptimisticOracleV3Interface oov3 = 
         OptimisticOracleV3Interface(0x9923D42eF695B5dd9911D05Ac944d4cAca3c4EAB);
@@ -65,8 +60,8 @@ contract iBuyer is IiBuyer, splitter {
         maxExpiration = _expiration;
     }
 
-    function releaseFunding(uint32 _index) public returns (bool, uint256) {
-        Deal storage deal = deals[msg.sender][_index];
+    function releaseFunding(bytes32 _index) public returns (bool, uint256) {
+        Deal storage deal = deals[_index];
 
         require(deal.openingId > 0, "Deal does not exist.");
         require(deal.expiration >= block.timestamp, "This deal has expired.");
@@ -87,8 +82,8 @@ contract iBuyer is IiBuyer, splitter {
         */
     }
 
-    function settleAndReleaseFunding(uint32 _index) public {
-        Deal storage deal = deals[msg.sender][_index];
+    function settleAndReleaseFunding(bytes32 _index) public {
+        Deal storage deal = deals[_index];
     
         require(deal.openingId > 0, "Deal does not exist.");
         require(deal.expiration >= block.timestamp, 'This deal has expired.');
@@ -96,19 +91,15 @@ contract iBuyer is IiBuyer, splitter {
 
         // Settle packet
         if (!deal.settledOpen) {
-            if (settleAndGetAssertionResult(deal.openingId)) {
-                deal.settledOpen = true;
-                uint256 value = deal.requestedFunding;
-                deal.requestedFunding = 0;
+            if (settleAndGetAssertionResult(deal.openingId, deal.openingId)) {
+                uint256 value = deal.authorizedFunding;
                 deal.authorizedFunding = 0;
                 (bool success, ) = deal.escrowAddress.call{value: value}("");
                 require(success, "The transfer could not be completed."); 
             }
         } else if (!deal.settledClose) {
-            if (settleAndGetAssertionResult(deal.closingId)) {
-                deal.settledClose = true;
-                uint256 value = deal.requestedFunding;
-                deal.requestedFunding = 0;
+            if (settleAndGetAssertionResult(deal.openingId, deal.closingId)) {
+                uint256 value = deal.authorizedFunding;
                 deal.authorizedFunding = 0;
                 (bool success, ) = deal.escrowAddress.call{value: value}("");
                 require(success, "The transfer could not be completed."); 
@@ -126,14 +117,15 @@ contract iBuyer is IiBuyer, splitter {
         // Needs a challenge window of 24hrs+
         bytes memory assertion = abi.encodePacked(_packetCID, assertionStatement, closingPacketRules);
         bytes32 assertionId = oov3.assertTruthWithDefaults(assertion, address(this));
-        adeals[assertionId] = Deal({
+        deals[assertionId] = Deal({
             originator          : msg.sender,
             openingId           : assertionId,
             closingId           : bytes32(0x00),
             openingCID          : _packetCID,
             closingCID          : new bytes(36),
             escrowDetails       : inputs.escrowDetails,
-            supportingDocuments : inputs.supportingDocuments,
+            openingDocuments    : inputs.supportingDocuments,
+            closingDocuments    : new bytes32[](0),
             escrowAddress       : inputs.escrowAddress,
             agentId             : inputs.agentId,
             expiration          : inputs.expiration,
@@ -144,11 +136,11 @@ contract iBuyer is IiBuyer, splitter {
         });
     }
 
-    function assertClosingPacket(bytes32 _packetCID, uint32 _index, bytes calldata proof, PacketInputs calldata inputs) public returns (Deal memory) {
-        Deal storage deal = deals[msg.sender][_index];
+    function assertClosingPacket(bytes calldata _packetCID, bytes32 _index, bytes calldata proof, PacketInputs calldata inputs) public returns (Deal memory) {
+        Deal storage deal = deals[_index];
 
         require(deal.openingId > 0, "Deal does not exist.");
-        require(deal.originator == msg.sender, "Caller is not authorized.");
+        require(deal.originator == msg.sender, "Caller is unauthorized.");
         require(deal.settledOpen, "Opening packet has not been settled yet");
         require(deal.authorizedFunding == 0, "Remaining funding must be claimed");
 
@@ -158,15 +150,17 @@ contract iBuyer is IiBuyer, splitter {
 
         bytes memory assertion = abi.encodePacked(_packetCID, assertionStatement, closingPacketRules);
 
-        deals[msg.sender][_index].closingId =
-        oov3.assertTruthWithDefaults(assertion, address(this));
-        deals[msg.sender][_index].closingCID = _packetCID;
+        deal.closingId = oov3.assertTruthWithDefaults(assertion, address(this));
+        deal.closingCID = _packetCID;
+
 
         return deal;
     }
 
-    function cancelDeal(uint32 _index) public returns (bool) {
-        Deal storage deal = deals[msg.sender][_index];
+    function cancelDeal(bytes32 _index) public returns (bool) {
+        Deal storage deal = deals[_index];
+
+        require(deal.originator == msg.sender, "Caller is unauthorized.");
 
         deal.requestedFunding = 0;
         deal.authorizedFunding = 0;
@@ -175,12 +169,21 @@ contract iBuyer is IiBuyer, splitter {
         return (true);
     }
 
-    function settleAndGetAssertionResult(bytes32 _assertionId) internal returns (bool) {
+    function settleAndGetAssertionResult(bytes32 _index, bytes32 _assertionId) internal returns (bool) {
         // Needs to be able to update state for authorized funding amounts
-        if (oov3.settleAndGetAssertionResult(_assertionId)) {
-            // Update deal 
-            
+        if (oov3.settleAndGetAssertionResult(_assertionId)) { 
+            Deal storage deal = deals[_index];
 
+            // Update deal and authorize funding
+            if (!deal.settledOpen) {
+                deal.settledOpen = true;
+            } else {
+                deal.settledClose = true;
+            }
+            
+            uint256 value = deal.requestedFunding;
+            deal.requestedFunding = 0;
+            deal.authorizedFunding += value;
             return true;
         }
 
