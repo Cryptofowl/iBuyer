@@ -1,32 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0
-pragma solidity 0.8.20;
+pragma solidity ^0.8.16;
 
-import "./OptimisticOracleV3Interface.sol";
+import "https://github.com/UMAprotocol/protocol/blob/7a93650a7494eaee83756382a18ecf11314499cf/packages/core/contracts/optimistic-oracle-v3/interfaces/OptimisticOracleV3Interface.sol";
 
-contract iBuyer {
-
-    struct Deal {
-        bytes32 openingId;
-        bytes32 closingId;
-        bytes32 openingCID;
-        bytes32 closingCID;
-        bytes32[] supportingDocuments;
-        bytes32 escrowDetails;
-        address escrowAddress;
-        uint16  agentId;
-        uint256 expiration;
-        uint256 authorizedFunding;
-        bool settledOpen;
-        bool settledClose;
-    }
+contract iBuyer is Iibuyer {
 
     // Need to map assertion statement to stored deal details so the assertion bool can greenlight
 
     bytes32 public immutable openingPacketRules;// = 0x4435c47b89eee270a3cddee3980eaac170eb991f7952b1ff4769ca18419ffc8a;
     bytes32 public immutable closingPacketRules;// = 0x4435c47b89eee270a3cddee3980eaac170eb991f7952b1ff4769ca18419ffc8a;
     bytes32 public immutable assertionStatement = "Matches the rules at ipfs:";
-    mapping (address => Deal[]) public deals;
-    mapping (bytes slice => uint8) public selectors;
+
+    mapping (address => Deal[]) public deals; // Why not map by assertion id? 
+    // Main issue would be asserters other than the agent creating the closing deal parameters
+    // i.e settle and release funding for opening after the challenge period, then immediately close with invalid parameters
+    // Can the closing parameters be overwritten as necessary? 
+    // Can the closing terms change before the challenge period ends? No, docs are signed
+    // Can add the originator as the authorized address in the deal struct
+
     OptimisticOracleV3Interface oov3 = 
         OptimisticOracleV3Interface(0x9923D42eF695B5dd9911D05Ac944d4cAca3c4EAB);
 
@@ -42,10 +33,11 @@ contract iBuyer {
         require(deal.settledOpen || deal.settledClose, "Oracle assertion has not been settled");
         require(deal.authorizedFunding > 0, "Funds have not been authorized");
 
-        if (deal.authorizedFunding > 0) {
-            (bool success, ) = deal.escrowAddress.call{value: deal.authorizedFunding}("");
-            require(success, "The transfer could not be completed."); 
-        }
+        uint256 value = deal.authorizedFunding;
+        deal.authorizedFunding = 0;
+
+        (bool success, ) = deal.escrowAddress.call{value: value}("");
+        require(success, "The transfer could not be completed."); 
         
         /*
            Checks: is the caller wallet allowed to withdraw? 
@@ -66,16 +58,20 @@ contract iBuyer {
         if (!deal.settledOpen) {
             if (settleAndGetAssertionResult(deal.openingId)) {
                 deal.settledOpen = true;
-                (bool success, ) = deal.escrowAddress.call{value: deal.authorizedFunding}("");
-                require(success, "The transfer could not be completed."); 
+                uint256 value = deal.requestedFunding;
+                deal.requestedFunding = 0;
                 deal.authorizedFunding = 0;
+                (bool success, ) = deal.escrowAddress.call{value: value}("");
+                require(success, "The transfer could not be completed."); 
             }
         } else if (!deal.settledClose) {
             if (settleAndGetAssertionResult(deal.closingId)) {
                 deal.settledClose = true;
-                (bool success, ) = deal.escrowAddress.call{value: deal.authorizedFunding}("");
-                require(success, "The transfer could not be completed."); 
+                uint256 value = deal.requestedFunding;
+                deal.requestedFunding = 0;
                 deal.authorizedFunding = 0;
+                (bool success, ) = deal.escrowAddress.call{value: value}("");
+                require(success, "The transfer could not be completed."); 
             }
         }
     }
@@ -116,52 +112,30 @@ contract iBuyer {
     function assertClosingPacket(bytes32 _packetCID, uint32 _index, Deal calldata inputs) public returns (Deal memory) {
         Deal storage deal = deals[msg.sender][_index];
 
+        require(deal.openingId > 0, "Deal does not exist.");
         require(deal.settledOpen, "Opening packet has not been settled yet");
         require(deal.authorizedFunding == 0, "Remaining funding must be claimed");
 
+        deals[msg.sender][_index].closingId =
+        oov3.assertTruthWithDefaults(assertion, address(this));
+        deals[msg.sender][_index].closingCID = _packetCID;
+
         bytes memory assertion = abi.encodePacked(_packetCID, assertionStatement, closingPacketRules);
 
-        deals[msg.sender][_index].closingId =
-            oov3.assertTruthWithDefaults(assertion, address(this));
-        deals[msg.sender][_index].closingCID = _packetCID;
         return deal;
     }
 
     function settleAndGetAssertionResult(bytes32 _assertionId) internal returns (bool) {
         // Needs to be able to update state for authorized funding amounts
+        if (oov3.settleAndGetAssertionResult(_assertionId)) {
+            
+        }
+
         return oov3.settleAndGetAssertionResult(_assertionId);
     }
 
     function getAssertionResult(bytes32 _assertionId) public view returns (bool) {
         return oov3.getAssertionResult(_assertionId);
-    }
-
-    function _decodeCID(bytes calldata CID) internal view returns (bytes32) {
-        bytes memory decoded;
-        bytes32 hash;
-        // v0 CIDs will be 46 characters beginning with Qm
-        if (keccak256(abi.encodePacked(CID[0:1])) == keccak256(abi.encodePacked("Qm")) && CID.length == 46) {
-            // Decode as base58
-            // QmbWqxBEKC3P8tqsKc98xmWNzrzDtRLMiMPL8wBuTGsMnR
-            decoded = bytes("1220c3c4733ec8affd06cf9e9ff50ffc6bcd2ec85a6170004bb709669c31de94391a");
-            assembly {
-                    hash := mload(add(decoded, 4))
-                }
-        } else {
-            // Decode according to multibase spec
-            // Use a mapping as a lookup table, map the bytes to function selector
-            uint8 selector = selectors[CID[0:1]];
-            if (CID[0] == "b") {
-                // Base32 decoding
-                // Go write a library I guess
-                decoded = bytes("01701220c3c4733ec8affd06cf9e9ff50ffc6bcd2ec85a6170004bb709669c31de94391a");
-                assembly {
-                    hash := mload(add(decoded, 8))
-                }
-                // Version: 01 Codec: 70 Multihash: 12 20 hash: 0xc3c4733ec8affd06cf9e9ff50ffc6bcd2ec85a6170004bb709669c31de94391a
-            }
-        } 
-        return (hash);
     }
 
     function returnDataFormat(Deal calldata inputs) public pure returns (Deal memory, bytes32 hash, bytes memory encoding) {
