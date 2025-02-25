@@ -14,8 +14,8 @@ interface IiBuyer {
         bytes openingCID;
         bytes closingCID;
         bytes32 escrowDetails;
-        bytes32[] openingDocuments;
-        bytes32[] closingDocuments;
+        bytes[] openingDocuments;
+        bytes[] closingDocuments;
         address escrowAddress;
         uint16  agentId;
         uint256 expiration;
@@ -28,8 +28,7 @@ interface IiBuyer {
     struct PacketInputs {
         bytes32 packetCID;
         bytes32 escrowDetails;
-        bytes32[] openingDocuments;
-        bytes32[] closingDocuments;
+        bytes[] supportingDocuments;
         address escrowAddress;
         uint16  agentId;
         uint256 authorizedFunding;
@@ -81,6 +80,7 @@ contract iBuyer is IiBuyer, splitter {
            What is the amount of funds allowed to be withdrawn for this stage of the deal?
            Has the deal expired? 
         */
+        return (success, value);
     }
 
     function settleAndReleaseFunding(bytes32 _index) public {
@@ -125,8 +125,8 @@ contract iBuyer is IiBuyer, splitter {
             openingCID          : _packetCID,
             closingCID          : new bytes(36),
             escrowDetails       : inputs.escrowDetails,
-            openingDocuments    : inputs.openingDocuments,
-            closingDocuments    : new bytes32[](0),
+            openingDocuments    : inputs.supportingDocuments,
+            closingDocuments    : new bytes[](0),
             escrowAddress       : inputs.escrowAddress,
             agentId             : inputs.agentId,
             expiration          : inputs.expiration,
@@ -137,9 +137,10 @@ contract iBuyer is IiBuyer, splitter {
         });
     }
 
-    function assertClosingPacket(bytes calldata _packetCID, bytes32 _index, bytes calldata proof, PacketInputs calldata inputs) public returns (Deal memory) {
+    function assertClosingPacket(bytes calldata _packetCID, bytes32 _index, bytes calldata proof, PacketInputs memory inputs) public returns (Deal memory) {
+        require(inputs.expiration >= block.timestamp + maxExpiration, "Expiration must not exceed 60 days.");
         Deal storage deal = deals[_index];
-
+        
         require(deal.openingId > 0, "Deal does not exist.");
         require(deal.originator == msg.sender, "Caller is unauthorized.");
         require(deal.settledOpen, "Opening packet has not been settled yet");
@@ -153,7 +154,9 @@ contract iBuyer is IiBuyer, splitter {
 
         deal.closingId = oov3.assertTruthWithDefaults(assertion, address(this));
         deal.closingCID = _packetCID;
-        deal.closingDocuments = inputs.closingDocuments;
+        deal.closingDocuments = inputs.supportingDocuments;
+        deal.requestedFunding = inputs.requestedFunding;
+        deal.expiration = inputs.expiration;
 
         return deal;
     }
@@ -171,20 +174,22 @@ contract iBuyer is IiBuyer, splitter {
     }
 
     function settleAndGetAssertionResult(bytes32 _index, bytes32 _assertionId) internal returns (bool) {
-        // Needs to be able to update state for authorized funding amounts
-        if (oov3.settleAndGetAssertionResult(_assertionId)) { 
-            Deal storage deal = deals[_index];
+        Deal storage deal = deals[_index];
+        require(!deal.settledOpen || !deal.settledClose); // Deal must not have been settled already
 
+        if (oov3.settleAndGetAssertionResult(_assertionId)) { 
             // Update deal and authorize funding
             if (!deal.settledOpen) {
                 deal.settledOpen = true;
-            } else {
+                uint256 value = deal.requestedFunding;
+                deal.requestedFunding = 0;
+                deal.authorizedFunding += value;
+            } else if (!deal.settledClose) {
                 deal.settledClose = true;
+                uint256 value = deal.requestedFunding;
+                deal.requestedFunding = 0;
+                deal.authorizedFunding += value;
             }
-            
-            uint256 value = deal.requestedFunding;
-            deal.requestedFunding = 0;
-            deal.authorizedFunding += value;
             return true;
         }
 
