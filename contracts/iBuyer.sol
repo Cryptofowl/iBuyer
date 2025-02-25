@@ -175,7 +175,6 @@ contract iBuyer is IiBuyer, splitter {
 
     function settleAndGetAssertionResult(bytes32 _index, bytes32 _assertionId) internal returns (bool) {
         Deal storage deal = deals[_index];
-        require(!deal.settledOpen || !deal.settledClose); // Deal must not have been settled already
 
         if (oov3.settleAndGetAssertionResult(_assertionId)) { 
             // Update deal and authorize funding
